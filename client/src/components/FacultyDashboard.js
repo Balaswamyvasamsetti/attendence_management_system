@@ -1,0 +1,752 @@
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import { Form, Button, Table, Modal, Card, Alert, Tab, Tabs } from 'react-bootstrap';
+import { Bar } from 'react-chartjs-2';
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  Title,
+  Tooltip,
+  Legend,
+} from 'chart.js';
+
+ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
+
+function FacultyDashboard({ user, setUser }) {
+  const [sections, setSections] = useState([]);
+  const [selectedSection, setSelectedSection] = useState('');
+  const [selectedSubject, setSelectedSubject] = useState('');
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  const [students, setStudents] = useState([]);
+  const [attendance, setAttendance] = useState({});
+  const [summary, setSummary] = useState({ present: 0, absent: 0 });
+  const [message, setMessage] = useState('');
+  const [showModal, setShowModal] = useState(false);
+  const [schedule, setSchedule] = useState([]);
+  const [newSchedule, setNewSchedule] = useState({ day: '', time: '', subject: '', section: '' });
+  const [editScheduleId, setEditScheduleId] = useState(null);
+  const [attendanceHistory, setAttendanceHistory] = useState([]);
+  const [analytics, setAnalytics] = useState({});
+  const [notifications, setNotifications] = useState([]);
+  const [profile, setProfile] = useState({ name: user.name, email: user.email, profilePicture: user.profilePicture || '' });
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [announcements, setAnnouncements] = useState([]);
+  const [newAnnouncement, setNewAnnouncement] = useState({ title: '', content: '' });
+  const [file, setFile] = useState(null);
+  const [showUploadModal, setShowUploadModal] = useState(false);
+
+  useEffect(() => {
+    const fetchSections = async () => {
+      try {
+        const res = await axios.get('http://localhost:5000/api/sections');
+        setSections(res.data);
+      } catch (err) {
+        addNotification('Failed to fetch sections: ' + (err.response?.data?.msg || err.message), 'error');
+      }
+    };
+    const fetchSchedule = async () => {
+      try {
+        const res = await axios.get('http://localhost:5000/api/schedule');
+        setSchedule(res.data);
+      } catch (err) {
+        addNotification('Failed to fetch schedule: ' + (err.response?.data?.msg || err.message), 'error');
+      }
+    };
+    const fetchAttendanceHistory = async () => {
+      try {
+        const res = await axios.get('http://localhost:5000/api/attendance');
+        setAttendanceHistory(res.data);
+      } catch (err) {
+        addNotification('Failed to fetch attendance history: ' + (err.response?.data?.msg || err.message), 'error');
+      }
+    };
+    const fetchAnnouncements = async () => {
+      try {
+        const res = await axios.get('http://localhost:5000/api/announcements');
+        setAnnouncements(res.data);
+      } catch (err) {
+        addNotification('Failed to fetch announcements: ' + (err.response?.data?.msg || err.message), 'error');
+      }
+    };
+    fetchSections();
+    fetchSchedule();
+    fetchAttendanceHistory();
+    fetchAnnouncements();
+  }, []);
+
+  const addNotification = (msg, type = 'success') => {
+    const id = Date.now();
+    setNotifications((prev) => [...prev, { id, msg, type }]);
+    setTimeout(() => {
+      setNotifications((prev) => prev.filter((n) => n.id !== id));
+    }, 5000);
+  };
+
+  const handleFilter = async () => {
+    try {
+      const studentRes = await axios.get(`http://localhost:5000/api/users?section=${selectedSection}`);
+      setStudents(studentRes.data);
+      setSummary({ present: 0, absent: 0 });
+      setAttendance({});
+
+      const dateAttendanceRes = await axios.get(
+        `http://localhost:5000/api/attendance?date=${selectedDate}&section=${selectedSection}`
+      );
+      const initialAttendance = dateAttendanceRes.data.reduce((acc, record) => {
+        acc[record.studentId] = record.status;
+        return acc;
+      }, {});
+      setAttendance(initialAttendance);
+      updateSummary(initialAttendance);
+
+      const startDate = new Date(selectedDate);
+      startDate.setDate(startDate.getDate() - 30);
+      const analyticsRes = await axios.get(
+        `http://localhost:5000/api/attendance?section=${selectedSection}&startDate=${startDate.toISOString()}&endDate=${selectedDate}`
+      );
+      const analyticsData = analyticsRes.data.reduce((acc, record) => {
+        acc[record.studentId] = acc[record.studentId] || { present: 0, absent: 0 };
+        acc[record.studentId][record.status]++;
+        return acc;
+      }, {});
+      setAnalytics(analyticsData);
+    } catch (err) {
+      addNotification('Failed to filter students: ' + (err.response?.data?.msg || err.message), 'error');
+    }
+  };
+
+  const updateSummary = (attendanceData) => {
+    const count = { present: 0, absent: 0 };
+    Object.values(attendanceData).forEach((status) => {
+      if (status === 'present') count.present++;
+      if (status === 'absent') count.absent++;
+    });
+    setSummary(count);
+  };
+
+  const handleAttendanceChange = (studentId, status) => {
+    setAttendance((prev) => {
+      const newAttendance = { ...prev, [studentId]: status };
+      updateSummary(newAttendance);
+      return newAttendance;
+    });
+  };
+
+  const submitAttendance = async () => {
+    // Validate required fields
+    if (!selectedSection || !selectedDate) {
+      addNotification('Please select a section and date before submitting.', 'error');
+      return;
+    }
+    if (Object.keys(attendance).length === 0) {
+      addNotification('No attendance data to submit.', 'error');
+      return;
+    }
+
+    try {
+      const subject = selectedSubject || user.subject || 'Default Subject'; // Fallback for subject
+      const attendancePromises = Object.entries(attendance).map(async ([studentId, status]) => {
+        try {
+          // Check for existing record with proper query parameters
+          const existingRes = await axios.get(
+            `http://localhost:5000/api/attendance?studentId=${studentId}&date=${selectedDate}&section=${selectedSection}`
+          );
+          const existingRecord = existingRes.data[0];
+
+          const payload = {
+            studentId,
+            section: selectedSection,
+            subject,
+            status,
+            date: selectedDate,
+          };
+
+          if (existingRecord) {
+            // Update existing record
+            return axios.put(`http://localhost:5000/api/attendance/${existingRecord._id}`, payload);
+          } else {
+            // Create new record
+            return axios.post('http://localhost:5000/api/attendance', payload);
+          }
+        } catch (err) {
+          throw new Error(`Failed for student ${studentId}: ${err.response?.data?.msg || err.message}`);
+        }
+      });
+
+      // Execute all attendance submissions concurrently
+      await Promise.all(attendancePromises);
+
+      // Refresh attendance history and reset state
+      const historyRes = await axios.get('http://localhost:5000/api/attendance');
+      setAttendanceHistory(historyRes.data);
+      setAttendance({}); // Clear attendance state
+      setSummary({ present: 0, absent: 0 }); // Reset summary
+      addNotification('Attendance submitted successfully!', 'success');
+    } catch (err) {
+      addNotification(`Failed to submit attendance: ${err.message}`, 'error');
+    }
+  };
+
+  const exportAttendance = () => {
+    const csv = [
+      ['Student ID', 'Name', 'Section', 'Status', 'Date', 'Time'],
+      ...students.map((student) => [
+        student.studentId,
+        student.name,
+        student.section,
+        attendance[student.studentId] || 'N/A',
+        selectedDate,
+        new Date().toLocaleTimeString(),
+      ]),
+    ]
+      .map((row) => row.join(','))
+      .join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `attendance_${selectedSection}_${selectedDate}.csv`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+    addNotification('Attendance exported successfully!');
+  };
+
+  const handleCreateSchedule = async (e) => {
+    e.preventDefault();
+    try {
+      await axios.post('http://localhost:5000/api/schedule', newSchedule);
+      setNewSchedule({ day: '', time: '', subject: '', section: '' });
+      const res = await axios.get('http://localhost:5000/api/schedule');
+      setSchedule(res.data);
+      addNotification('Schedule created successfully!');
+    } catch (err) {
+      addNotification('Failed to create schedule: ' + (err.response?.data?.msg || err.message), 'error');
+    }
+  };
+
+  const handleEditSchedule = (id) => {
+    const scheduleToEdit = schedule.find((s) => s._id === id);
+    setNewSchedule({
+      day: scheduleToEdit.day,
+      time: scheduleToEdit.time,
+      subject: scheduleToEdit.subject,
+      section: scheduleToEdit.section,
+    });
+    setEditScheduleId(id);
+  };
+
+  const handleUpdateSchedule = async (e) => {
+    e.preventDefault();
+    try {
+      await axios.put(
+        `http://localhost:5000/api/schedule/${editScheduleId}`,
+        newSchedule
+      );
+      setNewSchedule({ day: '', time: '', subject: '', section: '' });
+      setEditScheduleId(null);
+      const res = await axios.get('http://localhost:5000/api/schedule');
+      setSchedule(res.data);
+      addNotification('Schedule updated successfully!');
+    } catch (err) {
+      addNotification('Failed to update schedule: ' + (err.response?.data?.msg || err.message), 'error');
+    }
+  };
+
+  const handleDeleteSchedule = async (id) => {
+    try {
+      await axios.delete(`http://localhost:5000/api/schedule/${id}`);
+      const res = await axios.get('http://localhost:5000/api/schedule');
+      setSchedule(res.data);
+      addNotification('Schedule deleted successfully!');
+    } catch (err) {
+      addNotification('Failed to delete schedule: ' + (err.response?.data?.msg || err.message), 'error');
+    }
+  };
+
+  const handleProfileUpdate = async (e) => {
+    e.preventDefault();
+    try {
+      const updatedUser = {
+        ...user,
+        name: profile.name,
+        email: profile.email,
+        profilePicture: profile.profilePicture,
+      };
+      localStorage.setItem('user', JSON.stringify(updatedUser));
+      setUser(updatedUser);
+      setShowProfileModal(false);
+      addNotification('Profile updated successfully!');
+    } catch (err) {
+      addNotification('Failed to update profile: ' + (err.response?.data?.msg || err.message), 'error');
+    }
+  };
+
+  const handleProfilePictureChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setProfile({ ...profile, profilePicture: reader.result });
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleCreateAnnouncement = async (e) => {
+    e.preventDefault();
+    try {
+      await axios.post('http://localhost:5000/api/announcements', {
+        ...newAnnouncement,
+        facultyId: user._id,
+      });
+      setNewAnnouncement({ title: '', content: '' });
+      const res = await axios.get('http://localhost:5000/api/announcements');
+      setAnnouncements(res.data);
+      addNotification('Announcement posted successfully!');
+    } catch (err) {
+      addNotification('Failed to post announcement: ' + (err.response?.data?.msg || err.message), 'error');
+    }
+  };
+
+  const analyticsData = {
+    labels: students.map((s) => s.name),
+    datasets: [
+      {
+        label: 'Present',
+        data: students.map((s) => analytics[s.studentId]?.present || 0),
+        backgroundColor: '#d32f2f',
+      },
+      {
+        label: 'Absent',
+        data: students.map((s) => analytics[s.studentId]?.absent || 0),
+        backgroundColor: '#b71c1c',
+      },
+    ],
+  };
+
+  const handleUpload = async (e) => {
+    e.preventDefault();
+    if (!file) {
+      addNotification('Please select a CSV file to upload.', 'error');
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('csvFile', file);
+    formData.append('section', selectedSection);
+    formData.append('date', selectedDate);
+    formData.append('subject', selectedSubject || user.subject);
+
+    try {
+      const res = await axios.post('http://localhost:5000/api/attendance/upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      setAttendanceHistory(res.data.updatedAttendance);
+      addNotification('Attendance updated successfully from CSV!', 'success');
+      setFile(null);
+      setShowUploadModal(false);
+      handleFilter(); // Refresh attendance data
+    } catch (err) {
+      addNotification('Failed to upload CSV: ' + (err.response?.data?.msg || err.message), 'error');
+    }
+  };
+
+  const handleFileChange = (e) => {
+    setFile(e.target.files[0]);
+  };
+
+  return (
+    <div className="dashboard-content">
+      <h2>Welcome, {user.name}</h2>
+      <p><strong>Subject:</strong> {user.subject}</p>
+      <Button
+        variant="secondary"
+        className="mb-3"
+        onClick={() => setShowProfileModal(true)}
+      >
+        Edit Profile
+      </Button>
+      {notifications.map((notif) => (
+        <Alert
+          key={notif.id}
+          variant={notif.type === 'success' ? 'success' : 'danger'}
+          onClose={() => setNotifications((prev) => prev.filter((n) => n.id !== notif.id))}
+          dismissible
+        >
+          {notif.msg}
+        </Alert>
+      ))}
+      <Tabs defaultActiveKey="attendance" className="mb-4">
+        <Tab eventKey="attendance" title="Mark Attendance">
+          <Card className="mb-4">
+            <Card.Body>
+              <Card.Title>Attendance Management</Card.Title>
+              <Form>
+                <div className="row">
+                  <div className="col-md-4">
+                    <Form.Group className="form-group">
+                      <Form.Label>Date</Form.Label>
+                      <Form.Control
+                        type="date"
+                        value={selectedDate}
+                        onChange={(e) => setSelectedDate(e.target.value)}
+                        required
+                      />
+                    </Form.Group>
+                  </div>
+                  <div className="col-md-4">
+                    <Form.Group className="form-group">
+                      <Form.Label>Section</Form.Label>
+                      <Form.Control
+                        as="select"
+                        value={selectedSection}
+                        onChange={(e) => setSelectedSection(e.target.value)}
+                      >
+                        <option value="">Select Section</option>
+                        {sections.map((sec) => (
+                          <option key={sec} value={sec}>
+                            {sec}
+                          </option>
+                        ))}
+                      </Form.Control>
+                    </Form.Group>
+                  </div>
+                  <div className="col-md-4">
+                    <Form.Group className="form-group">
+                      <Form.Label>Subject</Form.Label>
+                      <Form.Control
+                        as="select"
+                        value={selectedSubject}
+                        onChange={(e) => setSelectedSubject(e.target.value)}
+                      >
+                        <option value="">Select Subject</option>
+                        <option value={user.subject}>{user.subject}</option>
+                        {schedule
+                          .filter((s) => s.section === selectedSection)
+                          .map((s) =>
+                            s.subject !== user.subject ? (
+                              <option key={s._id} value={s.subject}>
+                                {s.subject}
+                              </option>
+                            ) : null
+                          )}
+                      </Form.Control>
+                    </Form.Group>
+                  </div>
+                </div>
+                <div className="mt-3">
+                  <Button className="btn-danger me-2" onClick={handleFilter}>
+                    Filter Students
+                  </Button>
+                  <Button
+                    variant="primary"
+                    className="ms-2"
+                    onClick={() => setShowUploadModal(true)}
+                  >
+                    Upload Attendance CSV
+                  </Button>
+                </div>
+              </Form>
+              {students.length > 0 && (
+                <>
+                  <h4 className="mt-4">Mark Attendance for {new Date(selectedDate).toLocaleDateString()}</h4>
+                  <Table striped bordered hover>
+                    <thead>
+                      <tr>
+                        <th>Student ID</th>
+                        <th>Name</th>
+                        <th>Section</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {students.map((student) => (
+                        <tr key={student._id}>
+                          <td>{student.studentId}</td>
+                          <td>{student.name}</td>
+                          <td>{student.section}</td>
+                          <td>
+                            <Form.Check
+                              type="radio"
+                              label="Present"
+                              name={`attendance-${student._id}`}
+                              checked={attendance[student.studentId] === 'present'}
+                              onChange={() => handleAttendanceChange(student.studentId, 'present')}
+                            />
+                            <Form.Check
+                              type="radio"
+                              label="Absent"
+                              name={`attendance-${student._id}`}
+                              checked={attendance[student.studentId] === 'absent'}
+                              onChange={() => handleAttendanceChange(student.studentId, 'absent')}
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </Table>
+                  <p>
+                    <strong>Summary:</strong> Present - {summary.present}, Absent - {summary.absent}
+                  </p>
+                  <Button className="btn-danger me-2" onClick={submitAttendance}>
+                    Submit Attendance
+                  </Button>
+                  <Button className="btn-danger" onClick={exportAttendance}>
+                    Export to CSV
+                  </Button>
+                </>
+              )}
+            </Card.Body>
+          </Card>
+        </Tab>
+        <Tab eventKey="schedule" title="Manage Schedule">
+          <Card className="mb-4">
+            <Card.Body>
+              <Card.Title>Class Schedule</Card.Title>
+              <Table className="schedule-table">
+                <thead>
+                  <tr>
+                    <th>Day</th>
+                    <th>Time</th>
+                    <th>Subject</th>
+                    <th>Section</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {schedule.map((classItem) => (
+                    <tr key={classItem._id}>
+                      <td>{classItem.day}</td>
+                      <td>{classItem.time}</td>
+                      <td>{classItem.subject}</td>
+                      <td>{classItem.section}</td>
+                      <td>
+                        <Button
+                          variant="warning"
+                          onClick={() => handleEditSchedule(classItem._id)}
+                          className="me-2"
+                        >
+                          Edit
+                        </Button>
+                        <Button variant="danger" onClick={() => handleDeleteSchedule(classItem._id)}>
+                          Delete
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+              <Form onSubmit={editScheduleId ? handleUpdateSchedule : handleCreateSchedule}>
+                <div className="row">
+                  <div className="col-md-3">
+                    <Form.Group className="form-group">
+                      <Form.Label>Day</Form.Label>
+                      <Form.Control
+                        as="select"
+                        value={newSchedule.day}
+                        onChange={(e) =>
+                          setNewSchedule({ ...newSchedule, day: e.target.value })
+                        }
+                        required
+                      >
+                        <option value="">Select Day</option>
+                        {['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].map(
+                          (day) => (
+                            <option key={day} value={day}>
+                              {day}
+                            </option>
+                          )
+                        )}
+                      </Form.Control>
+                    </Form.Group>
+                  </div>
+                  <div className="col-md-3">
+                    <Form.Group className="form-group">
+                      <Form.Label>Time</Form.Label>
+                      <Form.Control
+                        type="text"
+                        value={newSchedule.time}
+                        onChange={(e) =>
+                          setNewSchedule({ ...newSchedule, time: e.target.value })
+                        }
+                        placeholder="e.g., 10:00 AM - 11:30 AM"
+                        required
+                      />
+                    </Form.Group>
+                  </div>
+                  <div className="col-md-3">
+                    <Form.Group className="form-group">
+                      <Form.Label>Subject</Form.Label>
+                      <Form.Control
+                        type="text"
+                        value={newSchedule.subject}
+                        onChange={(e) =>
+                          setNewSchedule({ ...newSchedule, subject: e.target.value })
+                        }
+                        placeholder="Enter subject"
+                        required
+                      />
+                    </Form.Group>
+                  </div>
+                  <div className="col-md-3">
+                    <Form.Group className="form-group">
+                      <Form.Label>Section</Form.Label>
+                      <Form.Control
+                        as="select"
+                        value={newSchedule.section}
+                        onChange={(e) =>
+                          setNewSchedule({ ...newSchedule, section: e.target.value })
+                        }
+                        required
+                      >
+                        <option value="">Select Section</option>
+                        {sections.map((sec) => (
+                          <option key={sec} value={sec}>
+                            {sec}
+                          </option>
+                        ))}
+                      </Form.Control>
+                    </Form.Group>
+                  </div>
+                </div>
+                <Button className="btn-danger" type="submit">
+                  {editScheduleId ? 'Update Schedule' : 'Add Schedule'}
+                </Button>
+              </Form>
+            </Card.Body>
+          </Card>
+        </Tab>
+        <Tab eventKey="analytics" title="Analytics">
+          <Card>
+            <Card.Body>
+              <Card.Title>Attendance Analytics</Card.Title>
+              {Object.keys(analytics).length > 0 && (
+                <Bar
+                  data={analyticsData}
+                  options={{
+                    responsive: true,
+                    plugins: {
+                      legend: { position: 'top' },
+                      title: { display: true, text: '30-Day Attendance Analytics' },
+                    },
+                  }}
+                />
+              )}
+            </Card.Body>
+          </Card>
+        </Tab>
+        <Tab eventKey="announcements" title="Announcements">
+          <Card>
+            <Card.Body>
+              <Card.Title>Post Announcement</Card.Title>
+              <Form onSubmit={handleCreateAnnouncement}>
+                <Form.Group className="form-group">
+                  <Form.Label>Title</Form.Label>
+                  <Form.Control
+                    type="text"
+                    value={newAnnouncement.title}
+                    onChange={(e) =>
+                      setNewAnnouncement({ ...newAnnouncement, title: e.target.value })
+                    }
+                    placeholder="Enter announcement title"
+                    required
+                  />
+                </Form.Group>
+                <Form.Group className="form-group">
+                  <Form.Label>Content</Form.Label>
+                  <Form.Control
+                    as="textarea"
+                    rows={4}
+                    value={newAnnouncement.content}
+                    onChange={(e) =>
+                      setNewAnnouncement({ ...newAnnouncement, content: e.target.value })
+                    }
+                    placeholder="Enter announcement content"
+                    required
+                  />
+                </Form.Group>
+                <Button className="btn-danger" type="submit">
+                  Post Announcement
+                </Button>
+              </Form>
+              <h4 className="mt-4">Recent Announcements</h4>
+              {announcements.length > 0 ? (
+                <Table striped bordered hover>
+                  <thead>
+                    <tr>
+                      <th>Title</th>
+                      <th>Content</th>
+                      <th>Date</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {announcements.map((ann) => (
+                      <tr key={ann._id}>
+                        <td>{ann.title}</td>
+                        <td>{ann.content}</td>
+                        <td>{new Date(ann.createdAt).toLocaleDateString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              ) : (
+                <p>No announcements available.</p>
+              )}
+            </Card.Body>
+          </Card>
+        </Tab>
+      </Tabs>
+      <Modal show={showModal} onHide={() => setShowModal(false)}>
+        <Modal.Header closeButton>
+          <Modal.Title>{message.includes('successfully') ? 'Success' : 'Error'}</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>{message}</Modal.Body>
+        <Modal.Footer>
+          <Button className="btn-danger" onClick={() => setShowModal(false)}>
+            Close
+          </Button>
+        </Modal.Footer>
+      </Modal>
+      <Modal show={showProfileModal} onHide={() => setShowProfileModal(false)}>
+        <Modal.Header closeButton>
+          <Modal.Title>Edit Profile</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          <Form onSubmit={handleProfileUpdate}>
+            <Form.Group className="mb-3">
+              <Form.Label>Name</Form.Label>
+              <Form.Control
+                type="text"
+                value={profile.name}
+                onChange={(e) => setProfile({ ...profile, name: e.target.value })}
+                required
+              />
+            </Form.Group>
+            <Form.Group className="mb-3">
+              <Form.Label>Email</Form.Label>
+              <Form.Control
+                type="email"
+                value={profile.email}
+                onChange={(e) => setProfile({ ...profile, email: e.target.value })}
+                required
+              />
+            </Form.Group>
+            <Form.Group className="mb-3">
+              <Form.Label>Profile Picture</Form.Label>
+              <Form.Control
+                type="file"
+                accept="image/*"
+                onChange={handleProfilePictureChange}
+              />
+              {profile.profilePicture && (
+                <img
+                  src={profile.profilePicture}
+                  alt="Profile"
+                  className="profile-picture-preview"
+                  style={{ maxWidth: '100px', marginTop: '10px' }}
+                />
+              )}
+            </Form.Group>
+        
