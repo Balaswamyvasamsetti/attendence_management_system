@@ -19,6 +19,8 @@
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
+    "prebuild": "chmod +x node_modules/.bin/react-scripts || true",
+
   },
   "eslintConfig": {
     "extends": [
