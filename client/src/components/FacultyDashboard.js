@@ -34,8 +34,17 @@ function FacultyDashboard({ user, setUser }) {
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [announcements, setAnnouncements] = useState([]);
   const [newAnnouncement, setNewAnnouncement] = useState({ title: '', content: '' });
+  const [editAnnouncement, setEditAnnouncement] = useState(null);
+  const [showEditAnnouncementModal, setShowEditAnnouncementModal] = useState(false);
+  const [showDeleteAnnouncementModal, setShowDeleteAnnouncementModal] = useState(false);
+  const [deleteAnnouncementId, setDeleteAnnouncementId] = useState(null);
   const [file, setFile] = useState(null);
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [leaveRequests, setLeaveRequests] = useState([]);
+  const [showLeaveActionModal, setShowLeaveActionModal] = useState(false);
+  const [selectedLeaveRequest, setSelectedLeaveRequest] = useState(null);
+  const [showEditAttendanceModal, setShowEditAttendanceModal] = useState(false);
+  const [showConfirmSubmitModal, setShowConfirmSubmitModal] = useState(false); // New state for submit confirmation
 
   useEffect(() => {
     const fetchSections = async () => {
@@ -70,11 +79,20 @@ function FacultyDashboard({ user, setUser }) {
         addNotification('Failed to fetch announcements: ' + (err.response?.data?.msg || err.message), 'error');
       }
     };
+    const fetchLeaveRequests = async () => {
+      try {
+        const res = await axios.get(`http://localhost:5000/api/leave-request?facultyId=${user._id}`);
+        setLeaveRequests(res.data);
+      } catch (err) {
+        addNotification('Failed to fetch leave requests: ' + (err.response?.data?.msg || err.message), 'error');
+      }
+    };
     fetchSections();
     fetchSchedule();
     fetchAttendanceHistory();
     fetchAnnouncements();
-  }, []);
+    fetchLeaveRequests();
+  }, [user._id]);
 
   const addNotification = (msg, type = 'success') => {
     const id = Date.now();
@@ -85,6 +103,14 @@ function FacultyDashboard({ user, setUser }) {
   };
 
   const handleFilter = async () => {
+    if (!selectedDate || new Date(selectedDate).toString() === 'Invalid Date') {
+      addNotification('Please select a valid date.', 'error');
+      return;
+    }
+    if (!selectedSection) {
+      addNotification('Please select a section.', 'error');
+      return;
+    }
     try {
       const studentRes = await axios.get(`http://localhost:5000/api/users?section=${selectedSection}`);
       setStudents(studentRes.data);
@@ -134,8 +160,7 @@ function FacultyDashboard({ user, setUser }) {
     });
   };
 
-  const submitAttendance = async () => {
-    // Validate required fields
+  const submitAttendance = async (isEdit = false) => {
     if (!selectedSection || !selectedDate) {
       addNotification('Please select a section and date before submitting.', 'error');
       return;
@@ -146,15 +171,39 @@ function FacultyDashboard({ user, setUser }) {
     }
 
     try {
-      const subject = selectedSubject || user.subject || 'Default Subject'; // Fallback for subject
+      // Check if attendance already exists for the date and section
+      const existingRes = await axios.get(
+        `http://localhost:5000/api/attendance?date=${selectedDate}&section=${selectedSection}`
+      );
+      const existingRecords = existingRes.data;
+
+      // Check if date is in the past
+      const today = new Date();
+      today.setHours(0, 0, 0, 0); // Normalize to start of day
+      const selected = new Date(selectedDate);
+      selected.setHours(0, 0, 0, 0);
+
+      if (selected < today && existingRecords.length === 0 && !isEdit) {
+        addNotification('Cannot submit attendance for past dates.', 'error');
+        return;
+      }
+
+      if (existingRecords.length > 0 && !isEdit) {
+        // Show edit confirmation modal if attendance exists
+        setShowEditAttendanceModal(true);
+        return;
+      }
+
+      // Show submit confirmation modal for new submissions (not edits)
+      if (!isEdit && existingRecords.length === 0) {
+        setShowConfirmSubmitModal(true);
+        return;
+      }
+
+      const subject = selectedSubject || user.subject || 'Default Subject';
       const attendancePromises = Object.entries(attendance).map(async ([studentId, status]) => {
         try {
-          // Check for existing record with proper query parameters
-          const existingRes = await axios.get(
-            `http://localhost:5000/api/attendance?studentId=${studentId}&date=${selectedDate}&section=${selectedSection}`
-          );
-          const existingRecord = existingRes.data[0];
-
+          const studentRecord = existingRecords.find((record) => record.studentId === studentId);
           const payload = {
             studentId,
             section: selectedSection,
@@ -163,11 +212,9 @@ function FacultyDashboard({ user, setUser }) {
             date: selectedDate,
           };
 
-          if (existingRecord) {
-            // Update existing record
-            return axios.put(`http://localhost:5000/api/attendance/${existingRecord._id}`, payload);
+          if (studentRecord) {
+            return axios.put(`http://localhost:5000/api/attendance/${studentRecord._id}`, payload);
           } else {
-            // Create new record
             return axios.post('http://localhost:5000/api/attendance', payload);
           }
         } catch (err) {
@@ -175,18 +222,26 @@ function FacultyDashboard({ user, setUser }) {
         }
       });
 
-      // Execute all attendance submissions concurrently
       await Promise.all(attendancePromises);
 
-      // Refresh attendance history and reset state
       const historyRes = await axios.get('http://localhost:5000/api/attendance');
       setAttendanceHistory(historyRes.data);
-      setAttendance({}); // Clear attendance state
-      setSummary({ present: 0, absent: 0 }); // Reset summary
-      addNotification('Attendance submitted successfully!', 'success');
+      setAttendance({});
+      setSummary({ present: 0, absent: 0 });
+      addNotification(`Attendance ${isEdit ? 'updated' : 'submitted'} successfully!`, 'success');
+      setShowEditAttendanceModal(false);
+      setShowConfirmSubmitModal(false);
     } catch (err) {
       addNotification(`Failed to submit attendance: ${err.message}`, 'error');
     }
+  };
+
+  const handleEditAttendanceConfirm = () => {
+    submitAttendance(true); // Proceed with edit
+  };
+
+  const handleSubmitConfirm = () => {
+    submitAttendance(false); // Proceed with new submission
   };
 
   const exportAttendance = () => {
@@ -240,10 +295,7 @@ function FacultyDashboard({ user, setUser }) {
   const handleUpdateSchedule = async (e) => {
     e.preventDefault();
     try {
-      await axios.put(
-        `http://localhost:5000/api/schedule/${editScheduleId}`,
-        newSchedule
-      );
+      await axios.put(`http://localhost:5000/api/schedule/${editScheduleId}`, newSchedule);
       setNewSchedule({ day: '', time: '', subject: '', section: '' });
       setEditScheduleId(null);
       const res = await axios.get('http://localhost:5000/api/schedule');
@@ -310,20 +362,47 @@ function FacultyDashboard({ user, setUser }) {
     }
   };
 
-  const analyticsData = {
-    labels: students.map((s) => s.name),
-    datasets: [
-      {
-        label: 'Present',
-        data: students.map((s) => analytics[s.studentId]?.present || 0),
-        backgroundColor: '#d32f2f',
-      },
-      {
-        label: 'Absent',
-        data: students.map((s) => analytics[s.studentId]?.absent || 0),
-        backgroundColor: '#b71c1c',
-      },
-    ],
+  const handleEditAnnouncement = (announcement) => {
+    setEditAnnouncement({ _id: announcement._id, title: announcement.title, content: announcement.content });
+    setShowEditAnnouncementModal(true);
+  };
+
+  const handleUpdateAnnouncement = async (e) => {
+    e.preventDefault();
+    try {
+      await axios.put(`http://localhost:5000/api/announcements/${editAnnouncement._id}`, {
+        title: editAnnouncement.title,
+        content: editAnnouncement.content,
+        facultyId: user._id,
+      });
+      setEditAnnouncement(null);
+      setShowEditAnnouncementModal(false);
+      const res = await axios.get('http://localhost:5000/api/announcements');
+      setAnnouncements(res.data);
+      addNotification('Announcement updated successfully!');
+    } catch (err) {
+      addNotification('Failed to update announcement: ' + (err.response?.data?.msg || err.message), 'error');
+    }
+  };
+
+  const handleDeleteAnnouncement = async () => {
+    try {
+      await axios.delete(`http://localhost:5000/api/announcements/${deleteAnnouncementId}`, {
+        data: { facultyId: user._id },
+      });
+      setShowDeleteAnnouncementModal(false);
+      setDeleteAnnouncementId(null);
+      const res = await axios.get('http://localhost:5000/api/announcements');
+      setAnnouncements(res.data);
+      addNotification('Announcement deleted successfully!');
+    } catch (err) {
+      addNotification('Failed to delete announcement: ' + (err.response?.data?.msg || err.message), 'error');
+    }
+  };
+
+  const openDeleteAnnouncementModal = (id) => {
+    setDeleteAnnouncementId(id);
+    setShowDeleteAnnouncementModal(true);
   };
 
   const handleUpload = async (e) => {
@@ -347,7 +426,7 @@ function FacultyDashboard({ user, setUser }) {
       addNotification('Attendance updated successfully from CSV!', 'success');
       setFile(null);
       setShowUploadModal(false);
-      handleFilter(); // Refresh attendance data
+      handleFilter();
     } catch (err) {
       addNotification('Failed to upload CSV: ' + (err.response?.data?.msg || err.message), 'error');
     }
@@ -357,15 +436,44 @@ function FacultyDashboard({ user, setUser }) {
     setFile(e.target.files[0]);
   };
 
+  const handleLeaveAction = async (requestId, action) => {
+    try {
+      await axios.put(`http://localhost:5000/api/leave-request/${requestId}`, { status: action });
+      const res = await axios.get(`http://localhost:5000/api/leave-request?facultyId=${user._id}`);
+      setLeaveRequests(res.data);
+      setShowLeaveActionModal(false);
+      addNotification(`Leave request ${action} successfully!`, 'success');
+    } catch (err) {
+      addNotification('Failed to update leave request: ' + (err.response?.data?.msg || err.message), 'error');
+    }
+  };
+
+  const openLeaveActionModal = (request) => {
+    setSelectedLeaveRequest(request);
+    setShowLeaveActionModal(true);
+  };
+
+  const analyticsData = {
+    labels: students.map((s) => s.name),
+    datasets: [
+      {
+        label: 'Present',
+        data: students.map((s) => analytics[s.studentId]?.present || 0),
+        backgroundColor: '#d32f2f',
+      },
+      {
+        label: 'Absent',
+        data: students.map((s) => analytics[s.studentId]?.absent || 0),
+        backgroundColor: '#b71c1c',
+      },
+    ],
+  };
+
   return (
     <div className="dashboard-content">
       <h2>Welcome, {user.name}</h2>
       <p><strong>Subject:</strong> {user.subject}</p>
-      <Button
-        variant="secondary"
-        className="mb-3"
-        onClick={() => setShowProfileModal(true)}
-      >
+      <Button variant="secondary" className="mb-3" onClick={() => setShowProfileModal(true)}>
         Edit Profile
       </Button>
       {notifications.map((notif) => (
@@ -440,11 +548,7 @@ function FacultyDashboard({ user, setUser }) {
                   <Button className="btn-danger me-2" onClick={handleFilter}>
                     Filter Students
                   </Button>
-                  <Button
-                    variant="primary"
-                    className="ms-2"
-                    onClick={() => setShowUploadModal(true)}
-                  >
+                  <Button variant="primary" className="ms-2" onClick={() => setShowUploadModal(true)}>
                     Upload Attendance CSV
                   </Button>
                 </div>
@@ -490,7 +594,7 @@ function FacultyDashboard({ user, setUser }) {
                   <p>
                     <strong>Summary:</strong> Present - {summary.present}, Absent - {summary.absent}
                   </p>
-                  <Button className="btn-danger me-2" onClick={submitAttendance}>
+                  <Button className="btn-danger me-2" onClick={() => submitAttendance()}>
                     Submit Attendance
                   </Button>
                   <Button className="btn-danger" onClick={exportAttendance}>
@@ -546,9 +650,7 @@ function FacultyDashboard({ user, setUser }) {
                       <Form.Control
                         as="select"
                         value={newSchedule.day}
-                        onChange={(e) =>
-                          setNewSchedule({ ...newSchedule, day: e.target.value })
-                        }
+                        onChange={(e) => setNewSchedule({ ...newSchedule, day: e.target.value })}
                         required
                       >
                         <option value="">Select Day</option>
@@ -568,9 +670,7 @@ function FacultyDashboard({ user, setUser }) {
                       <Form.Control
                         type="text"
                         value={newSchedule.time}
-                        onChange={(e) =>
-                          setNewSchedule({ ...newSchedule, time: e.target.value })
-                        }
+                        onChange={(e) => setNewSchedule({ ...newSchedule, time: e.target.value })}
                         placeholder="e.g., 10:00 AM - 11:30 AM"
                         required
                       />
@@ -582,9 +682,7 @@ function FacultyDashboard({ user, setUser }) {
                       <Form.Control
                         type="text"
                         value={newSchedule.subject}
-                        onChange={(e) =>
-                          setNewSchedule({ ...newSchedule, subject: e.target.value })
-                        }
+                        onChange={(e) => setNewSchedule({ ...newSchedule, subject: e.target.value })}
                         placeholder="Enter subject"
                         required
                       />
@@ -596,9 +694,7 @@ function FacultyDashboard({ user, setUser }) {
                       <Form.Control
                         as="select"
                         value={newSchedule.section}
-                        onChange={(e) =>
-                          setNewSchedule({ ...newSchedule, section: e.target.value })
-                        }
+                        onChange={(e) => setNewSchedule({ ...newSchedule, section: e.target.value })}
                         required
                       >
                         <option value="">Select Section</option>
@@ -647,9 +743,7 @@ function FacultyDashboard({ user, setUser }) {
                   <Form.Control
                     type="text"
                     value={newAnnouncement.title}
-                    onChange={(e) =>
-                      setNewAnnouncement({ ...newAnnouncement, title: e.target.value })
-                    }
+                    onChange={(e) => setNewAnnouncement({ ...newAnnouncement, title: e.target.value })}
                     placeholder="Enter announcement title"
                     required
                   />
@@ -660,9 +754,7 @@ function FacultyDashboard({ user, setUser }) {
                     as="textarea"
                     rows={4}
                     value={newAnnouncement.content}
-                    onChange={(e) =>
-                      setNewAnnouncement({ ...newAnnouncement, content: e.target.value })
-                    }
+                    onChange={(e) => setNewAnnouncement({ ...newAnnouncement, content: e.target.value })}
                     placeholder="Enter announcement content"
                     required
                   />
@@ -679,6 +771,7 @@ function FacultyDashboard({ user, setUser }) {
                       <th>Title</th>
                       <th>Content</th>
                       <th>Date</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -687,12 +780,78 @@ function FacultyDashboard({ user, setUser }) {
                         <td>{ann.title}</td>
                         <td>{ann.content}</td>
                         <td>{new Date(ann.createdAt).toLocaleDateString()}</td>
+                        <td>
+                          <Button
+                            variant="warning"
+                            className="me-2"
+                            onClick={() => handleEditAnnouncement(ann)}
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            variant="danger"
+                            onClick={() => openDeleteAnnouncementModal(ann._id)}
+                          >
+                            Delete
+                          </Button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </Table>
               ) : (
                 <p>No announcements available.</p>
+              )}
+            </Card.Body>
+          </Card>
+        </Tab>
+        <Tab eventKey="leave-requests" title="Leave Requests">
+          <Card>
+            <Card.Body>
+              <Card.Title>Leave Requests</Card.Title>
+              {leaveRequests.length > 0 ? (
+                <Table striped bordered hover>
+                  <thead>
+                    <tr>
+                      <th>Student Name</th>
+                      <th>Student ID</th>
+                      <th>Section</th>
+                      <th>Reason</th>
+                      <th>From Date</th>
+                      <th>To Date</th>
+                      <th>Status</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {leaveRequests.map((request) => (
+                      <tr key={request._id}>
+                        <td>{request.studentId?.name || 'N/A'}</td>
+                        <td>{request.studentCode}</td>
+                        <td>{request.section}</td>
+                        <td>{request.reason}</td>
+                        <td>{new Date(request.fromDate).toLocaleDateString()}</td>
+                        <td>{new Date(request.toDate).toLocaleDateString()}</td>
+                        <td>{request.status}</td>
+                        <td>
+                          {request.status === 'pending' && (
+                            <>
+                              <Button
+                                variant="success"
+                                className="me-2"
+                                onClick={() => openLeaveActionModal(request)}
+                              >
+                                Review
+                              </Button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              ) : (
+                <p>No leave requests available.</p>
               )}
             </Card.Body>
           </Card>
@@ -749,4 +908,170 @@ function FacultyDashboard({ user, setUser }) {
                 />
               )}
             </Form.Group>
-        
+            <Button className="btn-danger" type="submit">
+              Save Changes
+            </Button>
+          </Form>
+        </Modal.Body>
+      </Modal>
+      <Modal show={showUploadModal} onHide={() => setShowUploadModal(false)}>
+        <Modal.Header closeButton>
+          <Modal.Title>Upload Attendance CSV</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          <Form onSubmit={handleUpload}>
+            <Form.Group className="mb-3">
+              <Form.Label>CSV File</Form.Label>
+              <Form.Control
+                type="file"
+                accept=".csv"
+                onChange={handleFileChange}
+                required
+              />
+              <Form.Text className="text-muted">
+                Upload a CSV file with columns: studentId, date, status (e.g., present/absent).
+              </Form.Text>
+            </Form.Group>
+            <Button type="submit" className="btn-primary">
+              Upload
+            </Button>
+          </Form>
+        </Modal.Body>
+      </Modal>
+      <Modal show={showLeaveActionModal} onHide={() => setShowLeaveActionModal(false)}>
+        <Modal.Header closeButton>
+          <Modal.Title>Review Leave Request</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          {selectedLeaveRequest && (
+            <>
+              <p><strong>Student Name:</strong> {selectedLeaveRequest.studentId?.name || 'N/A'}</p>
+              <p><strong>Student ID:</strong> {selectedLeaveRequest.studentCode}</p>
+              <p><strong>Section:</strong> {selectedLeaveRequest.section}</p>
+              <p><strong>Reason:</strong> {selectedLeaveRequest.reason}</p>
+              <p><strong>From Date:</strong> {new Date(selectedLeaveRequest.fromDate).toLocaleDateString()}</p>
+              <p><strong>To Date:</strong> {new Date(selectedLeaveRequest.toDate).toLocaleDateString()}</p>
+              <p><strong>Status:</strong> {selectedLeaveRequest.status}</p>
+              <p>
+                <strong>Proof Document:</strong>{' '}
+                <a href={`http://localhost:5000/${selectedLeaveRequest.proof}`} target="_blank" rel="noopener noreferrer">
+                  View Proof
+                </a>
+              </p>
+            </>
+          )}
+        </Modal.Body>
+        <Modal.Footer>
+          <Button
+            variant="success"
+            onClick={() => handleLeaveAction(selectedLeaveRequest._id, 'approved')}
+          >
+            Approve
+          </Button>
+          <Button
+            variant="danger"
+            onClick={() => handleLeaveAction(selectedLeaveRequest._id, 'rejected')}
+          >
+            Reject
+          </Button>
+          <Button variant="secondary" onClick={() => setShowLeaveActionModal(false)}>
+            Cancel
+          </Button>
+        </Modal.Footer>
+      </Modal>
+      <Modal show={showEditAnnouncementModal} onHide={() => setShowEditAnnouncementModal(false)}>
+        <Modal.Header closeButton>
+          <Modal.Title>Edit Announcement</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          {editAnnouncement && (
+            <Form onSubmit={handleUpdateAnnouncement}>
+              <Form.Group className="mb-3">
+                <Form.Label>Title</Form.Label>
+                <Form.Control
+                  type="text"
+                  value={editAnnouncement.title}
+                  onChange={(e) => setEditAnnouncement({ ...editAnnouncement, title: e.target.value })}
+                  placeholder="Enter announcement title"
+                  required
+                />
+              </Form.Group>
+              <Form.Group className="mb-3">
+                <Form.Label>Content</Form.Label>
+                <Form.Control
+                  as="textarea"
+                  rows={4}
+                  value={editAnnouncement.content}
+                  onChange={(e) => setEditAnnouncement({ ...editAnnouncement, content: e.target.value })}
+                  placeholder="Enter announcement content"
+                  required
+                />
+              </Form.Group>
+              <Button type="submit" className="btn-primary">
+                Update Announcement
+              </Button>
+            </Form>
+          )}
+        </Modal.Body>
+      </Modal>
+      <Modal show={showDeleteAnnouncementModal} onHide={() => setShowDeleteAnnouncementModal(false)}>
+        <Modal.Header closeButton>
+          <Modal.Title>Confirm Deletion</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          Are you sure you want to delete this announcement? This action cannot be undone.
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant="secondary" onClick={() => setShowDeleteAnnouncementModal(false)}>
+            Cancel
+          </Button>
+          <Button variant="danger" onClick={handleDeleteAnnouncement}>
+            Delete
+          </Button>
+        </Modal.Footer>
+      </Modal>
+      <Modal
+        show={showEditAttendanceModal}
+        onHide={() => setShowEditAttendanceModal(false)}
+        centered
+      >
+        <Modal.Header closeButton>
+          <Modal.Title>Attendance Already Submitted</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          Attendance for {selectedDate} has already been submitted for this section. Do you want to edit it?
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant="secondary" onClick={() => setShowEditAttendanceModal(false)}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={handleEditAttendanceConfirm}>
+            Edit
+          </Button>
+        </Modal.Footer>
+      </Modal>
+      <Modal
+        show={showConfirmSubmitModal}
+        onHide={() => setShowConfirmSubmitModal(false)}
+        centered
+      >
+        <Modal.Header closeButton>
+          <Modal.Title>Confirm Attendance Submission</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          Are you sure you want to submit attendance for {new Date(selectedDate).toLocaleDateString()}?
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant="secondary" onClick={() => setShowConfirmSubmitModal(false)}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={handleSubmitConfirm}>
+            Confirm
+          </Button>
+        </Modal.Footer>
+      </Modal>
+    </div>
+  );
+}
+
+export default FacultyDashboard;

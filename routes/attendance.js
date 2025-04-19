@@ -2,8 +2,8 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const csv = require('csv-parser');
-const fs = require('fs');
-const Attendance = require('../models/Attendance'); // Your existing model
+const fs = require('fs').promises;
+const Attendance = require('../models/Attendance');
 
 // Configure multer for file upload
 const upload = multer({ dest: 'uploads/' });
@@ -14,57 +14,69 @@ router.post('/upload', upload.single('csvFile'), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ msg: 'No file uploaded' });
     }
+    if (!section || !date || !subject) {
+      await fs.unlink(req.file.path);
+      return res.status(400).json({ msg: 'Section, date, and subject are required' });
+    }
 
     const results = [];
-    fs.createReadStream(req.file.path)
-      .pipe(csv())
-      .on('data', (data) => results.push(data))
-      .on('end', async () => {
-        const updatedAttendance = [];
-        for (const record of results) {
-          const { studentId, date: csvDate, status } = record;
-          if (!studentId || !csvDate || !status) {
-            continue; // Skip invalid records
-          }
+    await new Promise((resolve, reject) => {
+      fs.createReadStream(req.file.path)
+        .pipe(csv())
+        .on('data', (data) => results.push(data))
+        .on('end', resolve)
+        .on('error', reject);
+    });
 
-          const attendanceDate = new Date(csvDate).toISOString().split('T')[0];
-          if (attendanceDate !== date) {
-            continue; // Skip if date doesn't match
-          }
+    const updatedAttendance = [];
+    for (const record of results) {
+      const { studentId, date: csvDate, status } = record;
+      if (!studentId || !csvDate || !status) {
+        continue; // Skip invalid records
+      }
 
-          const existingRecord = await Attendance.findOne({ studentId, date: attendanceDate });
-          if (existingRecord) {
-            existingRecord.status = status.toLowerCase();
-            existingRecord.section = section;
-            existingRecord.subject = subject;
-            await existingRecord.save();
-            updatedAttendance.push(existingRecord);
-          } else {
-            const newRecord = new Attendance({
-              studentId,
-              section,
-              subject,
-              date: attendanceDate,
-              status: status.toLowerCase(),
-            });
-            await newRecord.save();
-            updatedAttendance.push(newRecord);
-          }
-        }
+      const attendanceDate = new Date(csvDate).toISOString().split('T')[0];
+      if (attendanceDate !== date) {
+        continue; // Skip if date doesn't match
+      }
 
-        fs.unlinkSync(req.file.path); // Clean up temporary file
-        res.json({ msg: 'Attendance updated successfully', updatedAttendance });
-      })
-      .on('error', (err) => {
-        fs.unlinkSync(req.file.path); // Clean up on error
-        res.status(500).json({ msg: 'Error processing CSV', error: err.message });
+      if (!['present', 'absent'].includes(status.toLowerCase())) {
+        continue; // Skip invalid status
+      }
+
+      const existingRecord = await Attendance.findOne({
+        studentId,
+        date: new Date(attendanceDate),
+        section,
       });
+
+      if (existingRecord) {
+        existingRecord.status = status.toLowerCase();
+        existingRecord.subject = subject;
+        await existingRecord.save();
+        updatedAttendance.push(existingRecord);
+      } else {
+        const newRecord = new Attendance({
+          studentId,
+          section,
+          subject,
+          date: new Date(attendanceDate),
+          status: status.toLowerCase(),
+        });
+        await newRecord.save();
+        updatedAttendance.push(newRecord);
+      }
+    }
+
+    await fs.unlink(req.file.path); // Clean up temporary file
+    res.json({ msg: 'Attendance updated successfully', updatedAttendance });
   } catch (err) {
-    res.status(500).json({ msg: 'Server error', error: err.message });
+    if (req.file && req.file.path) {
+      await fs.unlink(req.file.path).catch(() => {}); // Clean up on error
+    }
+    console.error('CSV Upload Error:', err);
+    res.status(500).json({ msg: 'Error processing CSV', error: err.message });
   }
 });
-
-// Existing routes (if any) remain unchanged
-// Example: GET /attendance, PUT /attendance/:id, etc.
 
 module.exports = router;

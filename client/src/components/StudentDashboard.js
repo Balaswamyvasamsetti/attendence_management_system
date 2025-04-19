@@ -29,15 +29,16 @@ function StudentDashboard({ user, setUser }) {
   const [notifications, setNotifications] = useState([]);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [announcements, setAnnouncements] = useState([]);
-  const [leaveRequest, setLeaveRequest] = useState({ reason: '', fromDate: '', toDate: '' });
+  const [leaveRequest, setLeaveRequest] = useState({ reason: '', fromDate: '', toDate: '', proof: null });
   const [showLeaveModal, setShowLeaveModal] = useState(false);
+  const [leaveRequests, setLeaveRequests] = useState([]); // New state for leave requests
 
   useEffect(() => {
     const fetchAttendance = async () => {
       try {
         const res = await axios.get(`http://localhost:5000/api/attendance?studentId=${user.studentId}`);
         setAttendance(res.data);
-        checkAndNotifyAttendance(res.data); // Real-time notification check
+        checkAndNotifyAttendance(res.data);
       } catch (err) {
         addNotification('Failed to fetch attendance: ' + (err.response?.data?.msg || err.message), 'error');
       }
@@ -58,10 +59,19 @@ function StudentDashboard({ user, setUser }) {
         addNotification('Failed to fetch announcements: ' + (err.response?.data?.msg || err.message), 'error');
       }
     };
+    const fetchLeaveRequests = async () => {
+      try {
+        const res = await axios.get(`http://localhost:5000/api/leave-request?studentId=${user._id}`);
+        setLeaveRequests(res.data);
+      } catch (err) {
+        addNotification('Failed to fetch leave requests: ' + (err.response?.data?.msg || err.message), 'error');
+      }
+    };
     fetchAttendance();
     fetchSchedule();
     fetchAnnouncements();
-  }, [user.studentId]);
+    fetchLeaveRequests();
+  }, [user.studentId, user._id]);
 
   const addNotification = (msg, type = 'success') => {
     const id = Date.now();
@@ -140,21 +150,58 @@ function StudentDashboard({ user, setUser }) {
   };
 
   const handleLeaveChange = (e) => {
-    setLeaveRequest({ ...leaveRequest, [e.target.name]: e.target.value });
+    const { name, value, files } = e.target;
+    if (name === 'proof') {
+      setLeaveRequest({ ...leaveRequest, proof: files[0] });
+    } else {
+      setLeaveRequest({ ...leaveRequest, [name]: value });
+    }
   };
 
   const submitLeaveRequest = async (e) => {
     e.preventDefault();
     try {
-      await axios.post('http://localhost:5000/api/leave-request', {
-        studentId: user.studentId,
-        name: user.name,
-        ...leaveRequest,
+      if (!leaveRequest.proof) {
+        addNotification('Please upload a proof document for the leave request.', 'error');
+        return;
+      }
+
+      // Fetch all faculty members
+      const facultyRes = await axios.get('http://localhost:5000/api/users?role=faculty');
+      const facultyList = facultyRes.data;
+
+      if (!facultyList || facultyList.length === 0) {
+        addNotification('No faculty members available. Please contact the administrator.', 'error');
+        return;
+      }
+
+      const facultyIds = facultyList.map((faculty) => faculty._id);
+
+      // Prepare form data for file upload
+      const formData = new FormData();
+      formData.append('studentId', user._id); // Send MongoDB _id
+      formData.append('studentCode', user.studentId); // Send string student ID
+      formData.append('section', user.section);
+      formData.append('facultyIds', JSON.stringify(facultyIds));
+      formData.append('reason', leaveRequest.reason);
+      formData.append('fromDate', leaveRequest.fromDate);
+      formData.append('toDate', leaveRequest.toDate);
+      formData.append('proof', leaveRequest.proof);
+
+      // Send leave request
+      await axios.post('http://localhost:5000/api/leave-request', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
       });
-      setLeaveRequest({ reason: '', fromDate: '', toDate: '' });
+
+      setLeaveRequest({ reason: '', fromDate: '', toDate: '', proof: null });
       setShowLeaveModal(false);
-      addNotification('Leave request submitted successfully!', 'success');
+      addNotification('Leave request submitted successfully to all faculty!', 'success');
+
+      // Refresh leave requests
+      const res = await axios.get(`http://localhost:5000/api/leave-request?studentId=${user._id}`);
+      setLeaveRequests(res.data);
     } catch (err) {
+      console.error('Leave Request Error:', err.response?.data || err.message);
       addNotification('Failed to submit leave request: ' + (err.response?.data?.msg || err.message), 'error');
     }
   };
@@ -188,7 +235,7 @@ function StudentDashboard({ user, setUser }) {
       y: {
         beginAtZero: true,
         max: 1,
-        ticks: { color: '#ffffff', stepSize: 1, callback: (value) => value === 1 ? 'Present' : 'Absent' },
+        ticks: { color: '#ffffff', stepSize: 1, callback: (value) => (value === 1 ? 'Present' : 'Absent') },
       },
     },
   };
@@ -217,7 +264,7 @@ function StudentDashboard({ user, setUser }) {
     },
     scales: {
       x: { ticks: { color: '#ffffff' } },
-      y: { 
+      y: {
         beginAtZero: true,
         max: 100,
         ticks: { color: '#ffffff', stepSize: 10, callback: (value) => `${value}%` },
@@ -235,31 +282,19 @@ function StudentDashboard({ user, setUser }) {
   return (
     <div className="dashboard-content">
       <h2>Welcome, {profile.name}</h2>
-      <Button
-        variant="secondary"
-        className="mb-3"
-        onClick={() => setShowProfileModal(true)}
-      >
+      <Button variant="secondary" className="mb-3" onClick={() => setShowProfileModal(true)}>
         Edit Profile
       </Button>
-      <Button
-        variant="primary"
-        className="mb-3 ms-2"
-        onClick={() => setShowLeaveModal(true)}
-      >
+      <Button variant="primary" className="mb-3 ms-2" onClick={() => setShowLeaveModal(true)}>
         Apply for Leave
       </Button>
-      <Button
-        variant="info"
-        className="mb-3 ms-2"
-        onClick={exportAttendance}
-      >
+      <Button variant="info" className="mb-3 ms-2" onClick={exportAttendance}>
         Export Attendance
       </Button>
       {notifications.map((notif) => (
         <Alert
           key={notif.id}
-          variant={notif.type === 'success' ? 'success' : 'danger'}
+          variant={notif.type === 'success' ? 'success' : notif.type === 'warning' ? 'warning' : 'danger'}
           onClose={() => setNotifications((prev) => prev.filter((n) => n.id !== notif.id))}
           dismissible
         >
@@ -419,6 +454,58 @@ function StudentDashboard({ user, setUser }) {
             </Card.Body>
           </Card>
         </Tab>
+        <Tab eventKey="leave-requests" title="Leave Requests">
+          <Card>
+            <Card.Body>
+              <Card.Title>Leave Requests</Card.Title>
+              {leaveRequests.length > 0 ? (
+                <Table striped bordered hover>
+                  <thead>
+                    <tr>
+                      <th>Reason</th>
+                      <th>From Date</th>
+                      <th>To Date</th>
+                      <th>Status</th>
+                      <th>Proof</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {leaveRequests.map((request) => (
+                      <tr key={request._id}>
+                        <td>{request.reason}</td>
+                        <td>{new Date(request.fromDate).toLocaleDateString()}</td>
+                        <td>{new Date(request.toDate).toLocaleDateString()}</td>
+                        <td
+                          style={{
+                            color:
+                              request.status === 'approved'
+                                ? 'green'
+                                : request.status === 'rejected'
+                                ? 'red'
+                                : 'orange',
+                          }}
+                        >
+                          {request.status}
+                        </td>
+                        <td>
+                          <a
+                            href={`http://localhost:5000/${request.proof}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            View Proof
+                          </a>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              ) : (
+                <p>No leave requests submitted.</p>
+              )}
+            </Card.Body>
+          </Card>
+        </Tab>
       </Tabs>
       <Modal show={showProfileModal} onHide={() => setShowProfileModal(false)}>
         <Modal.Header closeButton>
@@ -525,6 +612,16 @@ function StudentDashboard({ user, setUser }) {
                 type="date"
                 name="toDate"
                 value={leaveRequest.toDate}
+                onChange={handleLeaveChange}
+                required
+              />
+            </Form.Group>
+            <Form.Group className="mb-3">
+              <Form.Label>Proof Document</Form.Label>
+              <Form.Control
+                type="file"
+                name="proof"
+                accept=".pdf,.jpg,.jpeg,.png"
                 onChange={handleLeaveChange}
                 required
               />
