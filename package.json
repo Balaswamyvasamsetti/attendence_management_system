@@ -2,9 +2,9 @@
   "name": "attendance-system-server",
   "version": "1.0.0",
   "scripts": {
-    "start": "node server.js",
-    "build": "cd client && npm install --scripts-prepend-node-path && npm run build",
-    "prestart": "npm run build"
+  "build": "cd client && npm install --legacy-peer-deps && npm run build",
+  "start": "cd client && npm start",
+  "prestart": "npm run build"
   },
   "dependencies": {
     "argon2": "^0.41.1",
